@@ -1,40 +1,197 @@
 #!/usr/bin/env bash
 # generate-pentoo-arm64.sh
-# Generate pentoo-arm64-base.config and per-device configs
-# UEFI preferred -- U-Boot only for boards without EDK2
-# If EDK2 becomes available for a board later, it will just boot grub2
+# Generate Pentoo ARM64 base and per-device configs
+# UEFI preferred; U-Boot only for boards without EDK2
 
 set -euo pipefail
 
 # -----------------------------
-# Version -- arg or probe overlay
+# Detect / set kernel version
 # -----------------------------
 if [[ -n "${1:-}" ]]; then
     PVR="$1"
 else
-    echo "Probing pentoo-overlay for latest version..."
+    echo "Probing Pentoo overlay for latest version..."
     PVR=$(curl -sSL "https://api.github.com/repos/pentoo/pentoo-overlay/contents/sys-kernel/pentoo-sources" \
         | jq -r '.[] | select(.name|test("^pentoo-sources-[0-9]+\\.[0-9]+\\.[0-9]+\\.ebuild$")) | .name' \
         | sed -E 's/pentoo-sources-([0-9]+\.[0-9]+\.[0-9]+)\.ebuild/\1/' \
         | sort -V | tail -n1)
-    [[ -z "$PVR" ]] && { echo "ERROR: Could not detect version."; exit 1; }
+    [[ -z "$PVR" ]] && { echo "ERROR: Could not detect Pentoo version"; exit 1; }
 fi
+echo "Kernel version: $PVR"
 
-echo "Kernel version : ${PVR}"
-
+# -----------------------------
+# Paths
+# -----------------------------
 FILESDIR="$(cd "$(dirname "$0")" && pwd)"
 SHARE_DIR="/usr/share/pentoo-sources"
 FRAG_DIR="${FILESDIR}/fragments"
+
 BASE_AMD64="${SHARE_DIR}/config-amd64-${PVR}"
 BASE_ARM64="${FILESDIR}/pentoo-arm64-base.config"
 
-# RPi branch derived from version -- not hardcoded
-RPI_BRANCH="rpi-${PVR%.*}.y"
-echo "RPi branch     : ${RPI_BRANCH}"
+mkdir -p "$FRAG_DIR"
 
-[[ ! -f "$BASE_AMD64" ]] && { echo "ERROR: AMD64 base not found at ${BASE_AMD64}"; exit 1; }
-mkdir -p "${FRAG_DIR}"
+[[ ! -f "$BASE_AMD64" ]] && { echo "ERROR: AMD64 base config not found at $BASE_AMD64"; exit 1; }
 
+# -----------------------------
+# Transmogrify AMD64 -> ARM64
+# -----------------------------
+echo "Generating ARM64 base config..."
+cp "$BASE_AMD64" "$BASE_ARM64"
+sed -i \
+    -e 's/x86_64/arm64/g' \
+    -e 's/amd64/arm64/g' \
+    -e '/^CONFIG_X86/d' \
+    -e '/^CONFIG_IA32/d' \
+    -e '/^CONFIG_COMPAT_32/d' \
+    -e '/^CONFIG_EFI_MIXED/d' \
+    -e 's/CONFIG_MTRR=y/# CONFIG_MTRR is not set/' \
+    -e 's/CONFIG_MICROCODE=y/# CONFIG_MICROCODE is not set/' \
+    -e 's/CONFIG_X86_MSR=y/# CONFIG_X86_MSR is not set/' \
+    -e 's/CONFIG_X86_CPUID=y/# CONFIG_X86_CPUID is not set/' \
+    "$BASE_ARM64"
+
+# -----------------------------
+# Fragments
+# -----------------------------
+cat > "$FRAG_DIR/uefi-edk2.fragment" <<'EOF'
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_EFIVAR_FS=y
+CONFIG_EFI_RUNTIME_WRAPPERS=y
+CONFIG_EFI_CAPSULE_LOADER=y
+CONFIG_FB_EFI=y
+CONFIG_SYSFB_SIMPLEFB=y
+CONFIG_DRM_SIMPLEDRM=y
+CONFIG_SECURITYFS=y
+CONFIG_INTEGRITY=y
+CONFIG_INTEGRITY_SIGNATURE=y
+CONFIG_INTEGRITY_ASYMMETRIC_KEYS=y
+CONFIG_LOAD_UEFI_KEYS=y
+CONFIG_SYSTEM_TRUSTED_KEYRING=y
+CONFIG_SECONDARY_TRUSTED_KEYRING=y
+CONFIG_IMA_ARCH_POLICY=y
+EOF
+
+cat > "$FRAG_DIR/uboot-only.fragment" <<'EOF'
+# CONFIG_EFI is not set
+# CONFIG_EFIVAR_FS is not set
+CONFIG_OF=y
+CONFIG_OF_EARLY_FLATTREE=y
+EOF
+
+cat > "$FRAG_DIR/acpi-on.fragment" <<'EOF'
+CONFIG_ACPI=y
+CONFIG_ACPI_REDUCED_HARDWARE_ONLY=y
+EOF
+
+cat > "$FRAG_DIR/acpi-off.fragment" <<'EOF'
+# CONFIG_ACPI is not set
+EOF
+
+# -----------------------------
+# Device mapping
+# -----------------------------
+declare -A DEVICE_URI_MAP=(
+    [rpi4]="https://raw.githubusercontent.com/raspberrypi/linux/rpi-6.1.y/arch/arm64/configs/bcm2711_defconfig"
+    [rpi5]="https://raw.githubusercontent.com/raspberrypi/linux/rpi-6.1.y/arch/arm64/configs/bcm2712_defconfig"
+    [orangepi5]="https://raw.githubusercontent.com/orangepi-xunlong/orangepi-build/main/external/config/orangepi5/linux-rk3588-current.config"
+    [orangepi5_plus]="https://raw.githubusercontent.com/orangepi-xunlong/orangepi-build/main/external/config/orangepi5_plus/linux-rk3588-current.config"
+    [orangepi6]="https://raw.githubusercontent.com/orangepi-xunlong/orangepi-build/main/external/config/orangepi6/linux-rk3588-current.config"
+    [orangepi6_plus]="https://raw.githubusercontent.com/orangepi-xunlong/orangepi-build/main/external/config/orangepi6_plus/linux-rk3588-current.config"
+    [apple_m1]="https://raw.githubusercontent.com/AsahiLinux/linux/asahi/arch/arm64/configs/asahi_defconfig"
+    [apple_m2]="https://raw.githubusercontent.com/AsahiLinux/linux/asahi/arch/arm64/configs/asahi_defconfig"
+    [apple_m3]="https://raw.githubusercontent.com/AsahiLinux/linux/asahi/arch/arm64/configs/asahi_defconfig"
+    [apple_m4]="https://raw.githubusercontent.com/AsahiLinux/linux/asahi/arch/arm64/configs/asahi_defconfig"
+    [pine64]="https://raw.githubusercontent.com/pine64/linux/pine64-kernel/arch/arm64/configs/pine64_defconfig"
+    [khadas_ampere_altra]="https://raw.githubusercontent.com/khadas/linux/khadas-vims-5.15/arch/arm64/configs/ampere_defconfig"
+)
+
+declare -A DEVICE_UEFI=(
+    [rpi4]=1
+    [rpi5]=1
+    [orangepi5]=0
+    [orangepi5_plus]=0
+    [orangepi6]=0
+    [orangepi6_plus]=0
+    [apple_m1]=1
+    [apple_m2]=1
+    [apple_m3]=1
+    [apple_m4]=1
+    [pine64]=0
+    [khadas_ampere_altra]=1
+)
+
+declare -A DEVICE_ACPI=(
+    [rpi5]=1
+    [apple_m1]=1
+    [apple_m2]=1
+    [apple_m3]=1
+    [apple_m4]=1
+    [khadas_ampere_altra]=1
+)
+
+# -----------------------------
+# Fetch upstream device configs
+# -----------------------------
+echo "Fetching device configs..."
+for device in "${!DEVICE_URI_MAP[@]}"; do
+    dest="${FILESDIR}/config-${device}-${PVR}"
+    url="${DEVICE_URI_MAP[$device]}"
+    echo "  $device"
+    curl -sSL "$url" -o "$dest" || echo "    WARN: failed to fetch $device"
+done
+
+# -----------------------------
+# Generate per-device configs
+# -----------------------------
+echo "Generating per-device configs..."
+for device in "${!DEVICE_URI_MAP[@]}"; do
+    cfg="${FILESDIR}/config-${device}-${PVR}"
+    [[ ! -f "$cfg" ]] && { echo "  SKIP: $device (no config)"; continue; }
+    merged="${FILESDIR}/pentoo-arm64-${device}.config"
+    cp "$BASE_ARM64" "$merged"
+    cat "$cfg" >> "$merged"
+
+    if [[ "${DEVICE_UEFI[$device]:-1}" == "1" ]]; then
+        cat "$FRAG_DIR/uefi-edk2.fragment" >> "$merged"
+    else
+        cat "$FRAG_DIR/uboot-only.fragment" >> "$merged"
+    fi
+
+    if [[ "${DEVICE_ACPI[$device]:-0}" == "1" ]]; then
+        cat "$FRAG_DIR/acpi-on.fragment" >> "$merged"
+    else
+        cat "$FRAG_DIR/acpi-off.fragment" >> "$merged"
+    fi
+
+    echo "CONFIG_LOCALVERSION=\"-pentoo-${PVR}-arm64-${device}\"" >> "$merged"
+done
+
+# -----------------------------
+# Kitchen-sink config
+# -----------------------------
+KITCHEN="${FILESDIR}/pentoo-arm64-all.config"
+cp "$BASE_ARM64" "$KITCHEN"
+cat "$FRAG_DIR/uefi-edk2.fragment" >> "$KITCHEN"
+cat "$FRAG_DIR/acpi-on.fragment" >> "$KITCHEN"
+for cfg in "${FILESDIR}"/config-*-"${PVR}"; do
+    [[ -f "$cfg" ]] && cat "$cfg" >> "$KITCHEN"
+done
+echo "CONFIG_LOCALVERSION=\"-pentoo-${PVR}-arm64-all\"" >> "$KITCHEN"
+echo "Kitchen-sink config: $KITCHEN"
+
+# -----------------------------
+# Deploy configs
+# -----------------------------
+echo "Deploying to $SHARE_DIR..."
+mkdir -p "$SHARE_DIR"
+cp -v "$BASE_ARM64" "$SHARE_DIR/"
+cp -v "${FILESDIR}"/pentoo-arm64-*.config "$SHARE_DIR/"
+cp -v "$KITCHEN" "$SHARE_DIR/"
+
+echo "Done. ARM64 configs ready in $SHARE_DIR"
 # -----------------------------
 # Transmogrify amd64 -> arm64 base
 # Kill x86-specific only -- EFI/ACPI left to fragments
